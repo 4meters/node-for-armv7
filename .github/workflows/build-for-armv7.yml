@@ -23,7 +23,6 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       # Step 1 - Download and install tttapa ARMv7 toolchain
-      # Step 1 - Download and install tttapa ARMv7 toolchain
       - name: Install tttapa ARMv7 toolchain
         run: |
           wget -q https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
@@ -31,7 +30,7 @@ jobs:
           # tar structure is x-tools/armv7-neon-linux-gnueabihf/...
           mkdir -p /opt/tttapa-toolchains
           tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz \
-            --strip-components=2 \
+            --strip-components=1 \
             -C /opt/tttapa-toolchains \
             x-tools/armv7-neon-linux-gnueabihf
 
@@ -40,12 +39,15 @@ jobs:
 
           TOOLCHAIN_BIN=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin
           echo "=== Toolchain binaries ==="
-          ls "$TOOLCHAIN_BIN" | grep -E "gcc|g\+\+"
+          ls "$TOOLCHAIN_BIN" | grep -E "gcc|g++"
+          echo "=== Verify g++ ==="
+          "$TOOLCHAIN_BIN/armv7-neon-linux-gnueabihf-g++" --version
 
           # Add to PATH
           echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
           # Also save for later steps
           echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> $GITHUB_ENV
+
 
       # Step 2 - Install build dependencies
       - name: Install build dependencies
