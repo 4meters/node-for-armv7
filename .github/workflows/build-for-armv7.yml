@@ -26,12 +26,16 @@ jobs:
       - name: Install tttapa ARMv7 toolchain
         run: |
           wget -q https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
+          # First inspect the actual tar structure
+          tar -tf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz | head -20
           mkdir -p /opt/tttapa-toolchains
           tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz \
             --strip-components=2 \
             -C /opt/tttapa-toolchains \
-            x-tools/armv7-neon-linux-gnueabihf
-          echo "/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin" >> $GITHUB_PATH
+            xtools/armv7-neon-linux-gnueabihf
+          # Verify the binary exists after extraction
+          ls /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/ | head -10
+          ls /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/*g++*
 
       # Step 2 - Install build dependencies
       - name: Install build dependencies
