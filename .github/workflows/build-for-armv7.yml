@@ -229,4 +229,4 @@ jobs:
           name: "Node v26.3.0 - armv7l"
           files: release-artifacts/node-v26.3.0-armv7l.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}k
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
