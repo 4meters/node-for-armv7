@@ -7,8 +7,13 @@ on:
       - main
 
 jobs:
-  build:
+  # ============================================================
+  # JOB 1 - Setup, configure, build all host tools
+  # (mksnapshot, torque, bytecode_builtins_list_generator, etc.)
+  # ============================================================
+  build-host-tools:
     runs-on: ubuntu-latest
+    timeout-minutes: 340
 
     steps:
       - name: Checkout repository
@@ -16,40 +21,24 @@ jobs:
         with:
           path: node
 
-      # Step 0 - Install Rust via rustup
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      # Step 1 - Download and install tttapa ARMv7 toolchain
       - name: Install tttapa ARMv7 toolchain
         run: |
           wget -q https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
-
-          # tar structure is x-tools/armv7-neon-linux-gnueabihf/...
           mkdir -p /opt/tttapa-toolchains
           tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz \
             --strip-components=1 \
             -C /opt/tttapa-toolchains \
             x-tools/armv7-neon-linux-gnueabihf
-
-          echo "=== Extracted top-level structure ==="
-          ls /opt/tttapa-toolchains/
-
           TOOLCHAIN_BIN=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin
-          echo "=== Toolchain binaries ==="
-          ls "$TOOLCHAIN_BIN" | grep -E "gcc|g++"
-          echo "=== Verify g++ ==="
           "$TOOLCHAIN_BIN/armv7-neon-linux-gnueabihf-g++" --version
-
-          # Add to PATH
           echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
-          # Also save for later steps
           echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> $GITHUB_ENV
 
-
-      # Step 2 - Install build dependencies
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -58,91 +47,179 @@ jobs:
             gcc-multilib \
             g++-multilib \
             python3 \
-            python3-pip \
             pkg-config \
             libc6-dev \
-            make \
-            ninja-build
+            make
 
-      # Step 3 & 4 - Set compiler exports and Rust targets
       - name: Configure cross-compilation environment
         run: |
-          # Rust targets
           rustup target add i686-unknown-linux-gnu
           rustup target add armv7-unknown-linux-gnueabihf
 
-          # Write all exports to $GITHUB_ENV so they persist across steps
-          cat >> $GITHUB_ENV << 'EOF'
-          LDFLAGS=-static-libstdc++ -static-libgcc
-          CC=ccache /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/armv7-neon-linux-gnueabihf-gcc
-          CXX=ccache /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/armv7-neon-linux-gnueabihf-g++
-          CC_host=ccache gcc -m32 -msse2
-          CXX_host=ccache g++ -m32 -msse2
-          CC_target=ccache /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/armv7-neon-linux-gnueabihf-gcc
-          CXX_target=ccache /opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/armv7-neon-linux-gnueabihf-g++
-          CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc -m32 -msse2
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin/armv7-neon-linux-gnueabihf-gcc
-          EOF
+          CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
+          CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
 
-      # Step 5 - Configure Node.js build
+          echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
+          echo "CXX_host=ccache g++ -m32 -msse2" >> $GITHUB_ENV
+          echo "CC_target=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX_target=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=${CROSS_GCC}" >> $GITHUB_ENV
+
       - name: Configure Node.js
         working-directory: node
         run: |
+          $CXX --version
           ./configure --dest-cpu arm --partly-static
 
-      # Step 6 - Patch Rust crate mk files
       - name: Patch node_crates mk files
         working-directory: node
         run: |
           NODE_DIR="$(pwd)"
 
-          # Patch host.mk - cargo command
           sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/i686-unknown-linux-gnu/release; cargo rustc --release --frozen --target i686-unknown-linux-gnu --target-dir "$(obj)/gen"|g' \
             "${NODE_DIR}/out/deps/crates/node_crates.host.mk"
-
-          # Patch host.mk - output path references
           sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' \
             "${NODE_DIR}/out/deps/crates/node_crates.host.mk"
 
-          # Patch target.mk - cargo command
           sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/armv7-unknown-linux-gnueabihf/release; cargo rustc --release --frozen --target armv7-unknown-linux-gnueabihf --target-dir "$(obj)/gen"|g' \
             "${NODE_DIR}/out/deps/crates/node_crates.target.mk"
-
-          # Patch target.mk - output path references
           sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' \
             "${NODE_DIR}/out/deps/crates/node_crates.target.mk"
 
-          # mksnapshot host tool needs i686 version
           sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' \
             "${NODE_DIR}/out/tools/v8_gypfiles/mksnapshot.host.mk"
 
-          # All target binaries need the ARM version
           for f in \
             "${NODE_DIR}/out/node.target.mk" \
             "${NODE_DIR}/out/embedtest.target.mk" \
             "${NODE_DIR}/out/cctest.target.mk" \
             "${NODE_DIR}/out/node_mksnapshot.target.mk"; do
-            sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' "$f"
+            [ -f "$f" ] && sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' "$f"
           done
 
-      # Step 7 - Build
-      - name: Build Node.js
+      # Build only the host tools needed before ARM compilation can proceed.
+      # These are the slow part: V8 snapshot generator, Torque, bytecode generator.
+      # We target them explicitly so make stops after host tools are done.
+      - name: Build host tools only
         working-directory: node
+        run: |
+          make -j$(($(nproc)+1)) \
+            /home/runner/work/node/node/node/out/Release/mksnapshot \
+            /home/runner/work/node/node/node/out/Release/torque \
+            /home/runner/work/node/node/node/out/Release/bytecode_builtins_list_generator \
+            /home/runner/work/node/node/node/out/Release/gen-regexp-special-case \
+            /home/runner/work/node/node/node/out/Release/node_mksnapshot \
+            2>&1
+
+      # Save the entire source + build tree so Job 2 can continue
+      # We exclude heavy intermediate objects that job 2 will rebuild anyway
+      - name: Compress build tree for handoff
+        working-directory: node
+        run: |
+          # Save obj.host (host tool objects + binaries) and out/Release binaries
+          # but skip target .o files to reduce artifact size
+          tar --exclude='out/Release/obj/gen/armv7*' \
+              --exclude='out/Release/obj.target' \
+              -czf /tmp/node-host-build.tar.gz \
+              . 2>&1 | tail -5
+          ls -lh /tmp/node-host-build.tar.gz
+
+      - name: Upload host build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-host-build
+          path: /tmp/node-host-build.tar.gz
+          retention-days: 1
+
+  # ============================================================
+  # JOB 2 - Download host tools, compile ARM target, link node
+  # ============================================================
+  build-target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    needs: build-host-tools
+
+    steps:
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install tttapa ARMv7 toolchain
+        run: |
+          wget -q https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
+          mkdir -p /opt/tttapa-toolchains
+          tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz \
+            --strip-components=1 \
+            -C /opt/tttapa-toolchains \
+            x-tools/armv7-neon-linux-gnueabihf
+          TOOLCHAIN_BIN=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin
+          echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
+          echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ccache \
+            gcc-multilib \
+            g++-multilib \
+            python3 \
+            pkg-config \
+            libc6-dev \
+            make
+
+      - name: Download host build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: node-host-build
+          path: /tmp
+
+      - name: Restore build tree
+        run: |
+          mkdir -p /home/runner/work/node/node/node
+          tar -xzf /tmp/node-host-build.tar.gz \
+            -C /home/runner/work/node/node/node
+          ls /home/runner/work/node/node/node/out/Release/ | head -20
+
+      - name: Configure cross-compilation environment
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          rustup target add armv7-unknown-linux-gnueabihf
+
+          CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
+          CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
+
+          echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
+          echo "CXX_host=ccache g++ -m32 -msse2" >> $GITHUB_ENV
+          echo "CC_target=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX_target=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=${CROSS_GCC}" >> $GITHUB_ENV
+
+      # make is smart enough to see host tools already exist and skip them,
+      # then proceed to build ARM target objects and link the final binary
+      - name: Build ARM target (final node binary)
+        working-directory: /home/runner/work/node/node/node
         run: |
           make -j$(($(nproc)+1))
 
-      # Step 8 - Package and release
       - name: Package binary
-        working-directory: node
         run: |
           mkdir -p release-artifacts
-          zip release-artifacts/node-v26.3.0-armv7l.zip out/Release/node
+          zip release-artifacts/node-v26.3.0-armv7l.zip \
+            /home/runner/work/node/node/node/out/Release/node
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v26.3.0-armv7l
           name: "Node v26.3.0 - armv7l"
-          files: node/release-artifacts/node-v26.3.0-armv7l.zip
+          files: release-artifacts/node-v26.3.0-armv7l.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
