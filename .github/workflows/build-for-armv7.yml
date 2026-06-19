@@ -59,6 +59,7 @@ jobs:
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
 
+          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
@@ -72,7 +73,7 @@ jobs:
         working-directory: node
         run: |
           $CXX --version
-          ./configure --dest-cpu arm --partly-static
+          ./configure --dest-cpu arm
 
       - name: Patch node_crates mk files
         working-directory: node
@@ -102,17 +103,22 @@ jobs:
 
       # Build only the host tools needed before ARM compilation can proceed.
       # These are the slow part: V8 snapshot generator, Torque, bytecode generator.
-      # We target them explicitly so make stops after host tools are done.
+      # GYP generates a top-level Makefile that accepts target names directly.
       - name: Build host tools only
         working-directory: node
         run: |
-          make -j$(($(nproc)+1)) \
-            /home/runner/work/node/node/node/out/Release/mksnapshot \
-            /home/runner/work/node/node/node/out/Release/torque \
-            /home/runner/work/node/node/node/out/Release/bytecode_builtins_list_generator \
-            /home/runner/work/node/node/node/out/Release/gen-regexp-special-case \
-            /home/runner/work/node/node/node/out/Release/node_mksnapshot \
-            2>&1
+          # List available make targets to find the right names
+          echo "=== Available top-level make targets ==="
+          grep "^\.PHONY" out/Makefile | head -5 || true
+          grep "^[a-z].*:$" out/Makefile | head -20 || true
+
+          # GYP top-level Makefile is at out/Makefile, targets are plain names
+          # For cross builds, host tools are built as part of these targets
+          make -j$(($(nproc)+1)) -C out             mksnapshot             torque             bytecode_builtins_list_generator             gen-regexp-special-case             2>&1
+
+          # Verify the key binaries exist
+          echo "=== Checking host tool binaries ==="
+          ls -lh Release/mksnapshot Release/torque 2>/dev/null ||             ls -lh Release/ | head -20
 
       # Save the entire source + build tree so Job 2 can continue
       # We exclude heavy intermediate objects that job 2 will rebuild anyway
@@ -193,6 +199,7 @@ jobs:
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
 
+          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
