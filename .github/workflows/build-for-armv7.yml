@@ -21,7 +21,7 @@ jobs:
   # ============================================================
   build-host-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 345
     outputs:
       node_version: ${{ steps.get_version.outputs.node_version }}
 
@@ -322,7 +322,7 @@ jobs:
   # ============================================================
   build-target-2:
     runs-on: ubuntu-latest
-    timeout-minutes: 320
+    timeout-minutes: 350
     needs: [build-host-tools, build-target-1]
 
     steps:
