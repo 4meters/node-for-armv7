@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       node_branch:
-        description: 'Node.js branch to build (e.g. v26.x, v24.x). Leave empty to use default (v26.x).'
+        description: 'Node.js branch to build (e.g. v26.x, v22.x). Leave empty to use default.'
         required: false
         default: ''
   push:
@@ -113,7 +113,9 @@ jobs:
           echo "NODE_VERSION=$NODE_VERSION" >> $GITHUB_ENV
           echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
 
-          # git checkout to release commit
+          # git checkout puts us in detached HEAD at the exact release commit.
+          # Preferred over reset --hard since we cloned the branch only to find
+          # the commit — we do not need to stay on the branch tip.
           git checkout "$COMMIT_ID"
           echo "NODE_DIR=$(pwd)" >> $GITHUB_ENV
 
@@ -220,11 +222,12 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # JOB 2 - Download host tools, compile ARM target, link node
+  # JOB 2 - Download host tools, compile ARM target (part 1)
+  # Runs make for up to 5 hours then saves partial build
   # ============================================================
-  build-target:
+  build-target-1:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 320
     needs: build-host-tools
 
     steps:
@@ -288,7 +291,92 @@ jobs:
           echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc" >> $GITHUB_ENV
           echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=${CROSS_GCC}" >> $GITHUB_ENV
 
-      - name: Build ARM target (final node binary)
+      # make is smart enough to see host tools already exist and skip them,
+      # then proceed to build ARM target objects and link the final binary
+      - name: Build ARM target part 1 (5h timeout)
+        working-directory: /home/runner/work/node/node/node
+        run: |
+          # Run make for up to 5 hours then stop gracefully.
+          # The partial build tree is saved so job 3 can continue.
+          timeout 18000 make -j$(($(nproc)+1)) || true
+          echo "=== Build stopped, saving partial build tree ==="
+          ls -lh out/Release/ | head -20
+
+      - name: Compress partial build tree for handoff
+        working-directory: /home/runner/work/node/node/node
+        run: |
+          tar --exclude='out/Release/obj.host'               -czf /tmp/node-target-partial.tar.gz               . 2>&1 | tail -5
+          ls -lh /tmp/node-target-partial.tar.gz
+
+      - name: Upload partial build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-target-partial
+          path: /tmp/node-target-partial.tar.gz
+          retention-days: 1
+
+
+
+  # ============================================================
+  # JOB 3 - Continue ARM build (part 2) + package + release
+  # ============================================================
+  build-target-2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 320
+    needs: [build-host-tools, build-target-1]
+
+    steps:
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install tttapa ARMv7 toolchain
+        run: |
+          wget -q https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
+          mkdir -p /opt/tttapa-toolchains
+          tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz             --strip-components=1             -C /opt/tttapa-toolchains             x-tools/armv7-neon-linux-gnueabihf
+          TOOLCHAIN_BIN=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin
+          echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
+          echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             ccache             gcc-multilib             g++-multilib             python3             pkg-config             libc6-dev             make
+
+      - name: Download partial build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: node-target-partial
+          path: /tmp
+
+      - name: Restore partial build tree
+        run: |
+          mkdir -p /home/runner/work/node/node/node
+          tar -xzf /tmp/node-target-partial.tar.gz             -C /home/runner/work/node/node/node
+          echo "=== Restored build tree ==="
+          ls /home/runner/work/node/node/node/out/Release/ | head -20
+
+      - name: Configure cross-compilation environment
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          rustup target add armv7-unknown-linux-gnueabihf
+
+          CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
+          CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
+
+          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
+          echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
+          echo "CXX_host=ccache g++ -m32 -msse2" >> $GITHUB_ENV
+          echo "CC_target=ccache ${CROSS_GCC}" >> $GITHUB_ENV
+          echo "CXX_target=ccache ${CROSS_GXX}" >> $GITHUB_ENV
+          echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=${CROSS_GCC}" >> $GITHUB_ENV
+
+      - name: Build ARM target part 2 (finish)
         working-directory: /home/runner/work/node/node/node
         run: |
           make -j$(($(nproc)+1))
@@ -299,23 +387,17 @@ jobs:
         run: |
           NODE_DIR=/home/runner/work/node/node/node
           RELEASE_DIR=/tmp/node-release
-          # Install with default PREFIX=/usr/local, DESTDIR as staging root.
-          # npm paths are resolved at runtime via process.execPath so no
-          # hardcoded prefix is needed - works with nvm or any install location.
           RELEASE_NAME="node-v${NODE_VERSION}-linux-armv7l"
+          MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
+
           make -C "$NODE_DIR" install DESTDIR="$RELEASE_DIR"
 
-          # Rename usr/local to version folder so tar root matches what nvm expects
           mkdir -p "$RELEASE_DIR/usr"
           mv "$RELEASE_DIR/usr/local" "$RELEASE_DIR/$RELEASE_NAME"
 
-          # Add README, CHANGELOG and LICENSE matching official Node releases
-          cp "$NODE_DIR/README.md" "$RELEASE_DIR/$RELEASE_NAME/"
-          MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
-          cp "$NODE_DIR/CHANGELOG.md" "$RELEASE_DIR/$RELEASE_NAME/" 2>/dev/null || \
-            cp "$NODE_DIR/doc/changelogs/CHANGELOG_V${MAJOR}.md" "$RELEASE_DIR/$RELEASE_NAME/CHANGELOG.md" 2>/dev/null || \
-            echo "CHANGELOG not found, skipping"
-          cp "$NODE_DIR/LICENSE" "$RELEASE_DIR/$RELEASE_NAME/"
+          cp "$NODE_DIR/README.md"    "$RELEASE_DIR/$RELEASE_NAME/"
+          cp "$NODE_DIR/LICENSE"      "$RELEASE_DIR/$RELEASE_NAME/"
+          cp "$NODE_DIR/CHANGELOG.md" "$RELEASE_DIR/$RELEASE_NAME/" 2>/dev/null ||             cp "$NODE_DIR/doc/changelogs/CHANGELOG_V${MAJOR}.md"                "$RELEASE_DIR/$RELEASE_NAME/CHANGELOG.md" 2>/dev/null ||             echo "CHANGELOG not found, skipping"
 
           echo "=== Final archive layout ==="
           ls -la "$RELEASE_DIR/$RELEASE_NAME/"
@@ -324,12 +406,9 @@ jobs:
           echo "=== bin ==="
           ls -la "$RELEASE_DIR/$RELEASE_NAME/bin/"
 
-          # Create tar.gz with version/ as root folder.
-          # tar preserves symlinks (npm, npx -> ../lib/...) unlike zip.
           mkdir -p "$NODE_DIR/release-artifacts"
           cd "$RELEASE_DIR"
-          tar -czf "$NODE_DIR/release-artifacts/$RELEASE_NAME.tar.gz" \
-            "$RELEASE_NAME/"
+          tar -czf "$NODE_DIR/release-artifacts/$RELEASE_NAME.tar.gz"             "$RELEASE_NAME/"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
