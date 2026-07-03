@@ -21,7 +21,7 @@ jobs:
   # ============================================================
   build-host-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 345
+    timeout-minutes: 340
     outputs:
       node_version: ${{ steps.get_version.outputs.node_version }}
 
@@ -64,8 +64,7 @@ jobs:
 
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
-
-          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
+          
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
@@ -270,6 +269,7 @@ jobs:
         run: |
           mkdir -p /home/runner/work/node/node/node
           tar -xzf /tmp/node-host-build.tar.gz \
+            --touch \
             -C /home/runner/work/node/node/node
           ls /home/runner/work/node/node/node/out/Release/ | head -20
 
@@ -305,7 +305,9 @@ jobs:
       - name: Compress partial build tree for handoff
         working-directory: /home/runner/work/node/node/node
         run: |
-          tar --exclude='out/Release/obj.host'               -czf /tmp/node-target-partial.tar.gz               . 2>&1 | tail -5
+          # Include obj.host so job 3 make does not rebuild host tools from scratch.
+          # Exclude only .d dependency files to reduce size slightly.
+          tar --exclude='out/Release/.deps'               --exclude='out/Release/obj/gen/armv7-unknown-linux-gnueabihf'               -czf /tmp/node-target-partial.tar.gz               . 2>&1 | tail -5
           ls -lh /tmp/node-target-partial.tar.gz
 
       - name: Upload partial build artifact
@@ -322,7 +324,7 @@ jobs:
   # ============================================================
   build-target-2:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 320
     needs: [build-host-tools, build-target-1]
 
     steps:
@@ -354,7 +356,10 @@ jobs:
       - name: Restore partial build tree
         run: |
           mkdir -p /home/runner/work/node/node/node
-          tar -xzf /tmp/node-target-partial.tar.gz             -C /home/runner/work/node/node/node
+          # --touch sets extracted file timestamps to extraction time,
+          # which is newer than source files — make will see objects as
+          # up-to-date and skip recompilation correctly.
+          tar -xzf /tmp/node-target-partial.tar.gz             --touch             -C /home/runner/work/node/node/node
           echo "=== Restored build tree ==="
           ls /home/runner/work/node/node/node/out/Release/ | head -20
 
