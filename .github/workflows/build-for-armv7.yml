@@ -226,7 +226,7 @@ jobs:
   # ============================================================
   build-target-1:
     runs-on: ubuntu-latest
-    timeout-minutes: 320
+    timeout-minutes: 340
     needs: build-host-tools
 
     steps:
@@ -281,7 +281,6 @@ jobs:
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
 
-          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
@@ -324,7 +323,6 @@ jobs:
   # ============================================================
   build-target-2:
     runs-on: ubuntu-latest
-    timeout-minutes: 320
     needs: [build-host-tools, build-target-1]
 
     steps:
@@ -371,7 +369,6 @@ jobs:
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
 
-          echo "LDFLAGS=-static-libstdc++ -static-libgcc" >> $GITHUB_ENV
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
