@@ -64,7 +64,7 @@ jobs:
 
           CROSS_GCC="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-gcc"
           CROSS_GXX="${TOOLCHAIN_BIN}/armv7-neon-linux-gnueabihf-g++"
-          
+
           echo "CC=ccache ${CROSS_GCC}" >> $GITHUB_ENV
           echo "CXX=ccache ${CROSS_GXX}" >> $GITHUB_ENV
           echo "CC_host=ccache gcc -m32 -msse2" >> $GITHUB_ENV
@@ -304,9 +304,9 @@ jobs:
       - name: Compress partial build tree for handoff
         working-directory: /home/runner/work/node/node/node
         run: |
-          # Include obj.host so job 3 make does not rebuild host tools from scratch.
-          # Exclude only .d dependency files to reduce size slightly.
-          tar --exclude='out/Release/.deps'               --exclude='out/Release/obj/gen/armv7-unknown-linux-gnueabihf'               -czf /tmp/node-target-partial.tar.gz               . 2>&1 | tail -5
+          # Include everything - obj.host, .deps all needed for make to
+          # correctly continue without recompiling anything from scratch.
+          tar -czf /tmp/node-target-partial.tar.gz               . 2>&1 | tail -5
           ls -lh /tmp/node-target-partial.tar.gz
 
       - name: Upload partial build artifact
@@ -343,7 +343,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y             ccache             gcc-multilib             g++-multilib             python3             pkg-config             libc6-dev             make
+          sudo apt-get install -y ccache gcc-multilib g++-multilib python3 pkg-config libc6-dev make
 
       - name: Download partial build artifact
         uses: actions/download-artifact@v4
