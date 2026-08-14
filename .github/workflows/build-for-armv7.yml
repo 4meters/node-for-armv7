@@ -48,6 +48,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            curl \
             ccache \
             gcc-multilib \
             g++-multilib \
@@ -144,7 +145,6 @@ jobs:
       - name: Configure Node.js
         working-directory: node
         run: |
-          $CXX --version
           ./configure --dest-cpu arm --partly-static
 
       - name: Patch node_crates mk files
@@ -251,6 +251,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            curl \
             ccache \
             gcc-multilib \
             g++-multilib \
@@ -268,10 +269,14 @@ jobs:
       - name: Restore build tree
         run: |
           mkdir -p /home/runner/work/node/node/node
-          tar -xzf /tmp/node-host-build.tar.gz \
-            --touch \
-            -C /home/runner/work/node/node/node
+          tar -xzf /tmp/node-host-build.tar.gz             -C /home/runner/work/node/node/node
           ls /home/runner/work/node/node/node/out/Release/ | head -20
+
+          # Touch all source files to epoch so they appear OLDER than
+          # compiled objects — make will correctly skip already-built targets.
+          echo "=== Setting source timestamps older than objects ==="
+          find /home/runner/work/node/node/node             -not -path "*/out/*"             -type f             -exec touch -t 197001010000 {} +
+          echo "Done setting timestamps"
 
       - name: Configure cross-compilation environment
         run: |
@@ -343,7 +348,15 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ccache gcc-multilib g++-multilib python3 pkg-config libc6-dev make
+          sudo apt-get install -y \
+            curl \
+            ccache \
+            gcc-multilib \
+            g++-multilib \
+            python3 \
+            pkg-config \
+            libc6-dev \
+            make
 
       - name: Download partial build artifact
         uses: actions/download-artifact@v4
@@ -357,9 +370,15 @@ jobs:
           # --touch sets extracted file timestamps to extraction time,
           # which is newer than source files — make will see objects as
           # up-to-date and skip recompilation correctly.
-          tar -xzf /tmp/node-target-partial.tar.gz             --touch             -C /home/runner/work/node/node/node
+          tar -xzf /tmp/node-target-partial.tar.gz -C /home/runner/work/node/node/node
           echo "=== Restored build tree ==="
           ls /home/runner/work/node/node/node/out/Release/ | head -20
+
+          # Touch all source files to epoch so they appear OLDER than
+          # compiled objects — make will then correctly skip recompilation.
+          echo "=== Setting source timestamps older than objects ==="
+          find /home/runner/work/node/node/node -not -path "*/out/*" -type f -exec touch -t 197001010000 {} +
+          echo "Done setting timestamps"
 
       - name: Configure cross-compilation environment
         run: |
@@ -394,24 +413,26 @@ jobs:
 
           make -C "$NODE_DIR" install DESTDIR="$RELEASE_DIR"
 
-          mkdir -p "$RELEASE_DIR/usr"
-          mv "$RELEASE_DIR/usr/local" "$RELEASE_DIR/$RELEASE_NAME"
+          mv "$RELEASE_DIR/usr/local" "$RELEASE_DIR/v${NODE_VERSION}"
 
-          cp "$NODE_DIR/README.md"    "$RELEASE_DIR/$RELEASE_NAME/"
-          cp "$NODE_DIR/LICENSE"      "$RELEASE_DIR/$RELEASE_NAME/"
-          cp "$NODE_DIR/CHANGELOG.md" "$RELEASE_DIR/$RELEASE_NAME/" 2>/dev/null ||             cp "$NODE_DIR/doc/changelogs/CHANGELOG_V${MAJOR}.md"                "$RELEASE_DIR/$RELEASE_NAME/CHANGELOG.md" 2>/dev/null ||             echo "CHANGELOG not found, skipping"
+          cp "$NODE_DIR/README.md"    "$RELEASE_DIR/v${NODE_VERSION}/"
+          cp "$NODE_DIR/LICENSE"      "$RELEASE_DIR/v${NODE_VERSION}/"
+          cp "$NODE_DIR/CHANGELOG.md" "$RELEASE_DIR/v${NODE_VERSION}/" 2>/dev/null || \
+            cp "$NODE_DIR/doc/changelogs/CHANGELOG_V${MAJOR}.md" \
+               "$RELEASE_DIR/v${NODE_VERSION}/CHANGELOG.md" 2>/dev/null || \
+            echo "CHANGELOG not found, skipping"
 
           echo "=== Final archive layout ==="
-          ls -la "$RELEASE_DIR/$RELEASE_NAME/"
+          ls -la "$RELEASE_DIR/v${NODE_VERSION}/"
           echo "=== node_modules ==="
-          ls "$RELEASE_DIR/$RELEASE_NAME/lib/node_modules/" 2>/dev/null || echo "lib/node_modules not found"
+          ls "$RELEASE_DIR/v${NODE_VERSION}/lib/node_modules/" 2>/dev/null || echo "lib/node_modules not found"
           echo "=== bin ==="
-          ls -la "$RELEASE_DIR/$RELEASE_NAME/bin/"
+          ls -la "$RELEASE_DIR/v${NODE_VERSION}/bin/"
 
           mkdir -p "$NODE_DIR/release-artifacts"
           cd "$RELEASE_DIR"
-          tar -czf "$NODE_DIR/release-artifacts/$RELEASE_NAME.tar.gz"             "$RELEASE_NAME/"
-
+          tar -czf "$NODE_DIR/release-artifacts/$RELEASE_NAME.tar.gz" \
+            "v${NODE_VERSION}/"
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
