@@ -34,8 +34,8 @@ echo "=================================================="
 
 # ── Step 1: Install build dependencies ────────────────────────
 echo -e "\n=== Step 1: Install build dependencies ==="
-sudo apt-get update
-sudo apt-get install -y \
+sudo apt update
+sudo apt install -y \
     curl \
     ccache \
     gcc-multilib \
