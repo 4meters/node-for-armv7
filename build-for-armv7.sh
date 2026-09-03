@@ -4,11 +4,11 @@
 # Equivalent of the GitHub Actions build workflow
 #
 # Usage:
-#   ./build-armv7.sh [branch]
+#   sudo ./build-armv7.sh [branch]
 #
 # Examples:
-#   ./build-armv7.sh          # uses default branch v26.x
-#   ./build-armv7.sh v22.x    # builds v22.x
+#   sudo ./build-armv7.sh          # uses default branch v26.x
+#   sudo ./build-armv7.sh v24.x    # builds v24.x
 #
 # Requirements:
 #   - Ubuntu/Debian host (x86_64)
@@ -119,13 +119,15 @@ echo "Node.js version: $NODE_VERSION"
 
 git checkout "$COMMIT_ID"
 
-# ── Step 6: Patch string-hasher ───────────────────────────────
-echo -e "\n=== Step 6: Patch string-hasher ==="
+# ── Step 6a: Patch string-hasher (v25.x+ only) ───────────────────────────────
+echo -e "\n=== Step 6: Patch string-hasher (v25.x+ only) ==="
+FILE="$NODE_SRC/deps/v8/src/strings/string-hasher.cc"
+
 if [ -f "$NODE_SRC/.sse2-patched" ]; then
     echo "Already patched (found .sse2-patched), skipping"
+elif ! grep -q "#ifdef __SSE2__" "$FILE"; then
+	echo "WARN: #ifdef __SSE2__ not found in $FILE — not patching"
 else
-    FILE="$NODE_SRC/deps/v8/src/strings/string-hasher.cc"
-
     if ! grep -q "#ifdef __SSE2__" "$FILE"; then
         echo "ERROR: #ifdef __SSE2__ not found in $FILE — file structure may have changed"
         exit 1
@@ -142,41 +144,60 @@ else
     echo "Patched $COUNT occurrence(s) in $FILE"
 fi
 
+# ── Step 6b: Patch V8 int64-lowering Tuple template disambiguation (v24.x only) ───────────────────────────────
+echo -e "\n=== Step 6b: Patch V8 int64-lowering Tuple template disambiguation (v24.x only) ==="
+
+FILE="$NODE_SRC/deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h"
+if [ -f "$FILE" ] && grep -q "__ Tuple<" "$FILE"; then
+	sed -i 's/__ Tuple</__ template Tuple</g' "$FILE"
+	echo "Patched Tuple template disambiguation in $FILE"
+else
+	echo "No unfixed '__ Tuple<' occurrences in $FILE, skipping (v26.x already upstream-fixed)"
+fi
+
 # ── Step 7: Configure Node.js ─────────────────────────────────
 echo -e "\n=== Step 7: Configure Node.js ==="
 cd "$NODE_SRC"
 ./configure --dest-cpu arm --partly-static
 
-# ── Step 8: Patch node_crates mk files ────────────────────────
-echo -e "\n=== Step 8: Patch node_crates mk files ==="
+# ── Step 8: Patch node_crates mk files (v26.x+ only) ────────────────────────
+echo -e "\n=== Step 8: Patch node_crates mk files (v26.x+ only) ==="
 if [ -f "$NODE_SRC/.node-crates-patched" ]; then
     echo "Already patched (found .node-crates-patched), skipping"
 else
-    sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/i686-unknown-linux-gnu/release; cargo rustc --release --frozen --target i686-unknown-linux-gnu --target-dir "$(obj)/gen"|g' \
-        "$NODE_SRC/out/deps/crates/node_crates.host.mk"
-    sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' \
-        "$NODE_SRC/out/deps/crates/node_crates.host.mk"
+    node_crates_host_file="${NODE_DIR}/out/deps/crates/node_crates.host.mk"
+	if [[ -f "$node_crates_host_file" ]]; then
+		sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/i686-unknown-linux-gnu/release; cargo rustc --release --frozen --target i686-unknown-linux-gnu --target-dir "$(obj)/gen"|g' "$node_crates_host_file"
+		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' "$node_crates_host_file"
+	fi
+	node_crates_target_file="${NODE_DIR}/out/deps/crates/node_crates.target.mk"
+	if [[ -f "$node_crates_target_file" ]]; then
+		sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/armv7-unknown-linux-gnueabihf/release; cargo rustc --release --frozen --target armv7-unknown-linux-gnueabihf --target-dir "$(obj)/gen"|g' "$node_crates_target_file"
+		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' "$node_crates_target_file"
+	fi
+	mksnapshot_file="${NODE_DIR}/out/tools/v8_gypfiles/mksnapshot.host.mk"
+	if [[ -f "$mksnapshot_file" ]]; then
+		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' "$mksnapshot_file"
+	fi
 
-    sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/armv7-unknown-linux-gnueabihf/release; cargo rustc --release --frozen --target armv7-unknown-linux-gnueabihf --target-dir "$(obj)/gen"|g' \
-        "$NODE_SRC/out/deps/crates/node_crates.target.mk"
-    sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' \
-        "$NODE_SRC/out/deps/crates/node_crates.target.mk"
+	for f in \
+	"${NODE_DIR}/out/node.target.mk" \
+	"${NODE_DIR}/out/embedtest.target.mk" \
+	"${NODE_DIR}/out/cctest.target.mk" \
+	"${NODE_DIR}/out/node_mksnapshot.target.mk"
+	do
+		if [[ -f "$f" ]]; then
+	  		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' \
+				"$f"
+		fi
+	done
 
-    sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' \
-        "$NODE_SRC/out/tools/v8_gypfiles/mksnapshot.host.mk"
-
-    for f in \
-        "$NODE_SRC/out/node.target.mk" \
-        "$NODE_SRC/out/embedtest.target.mk" \
-        "$NODE_SRC/out/cctest.target.mk" \
-        "$NODE_SRC/out/node_mksnapshot.target.mk"; do
-        [ -f "$f" ] && sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' "$f"
-    done
-
-    touch "$NODE_SRC/.node-crates-patched"
-    echo "=== Patch verification ==="
-    grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.host.mk"
-    grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.target.mk"
+	if [[ -f "$node_crates_host_file" ]] && [[ -f "$node_crates_target_file" ]]; then
+		touch "$NODE_SRC/.node-crates-patched"
+		echo "=== Patch verification ==="
+		grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.host.mk"
+		grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.target.mk"
+	fi
 fi
 
 # ── Step 9: Build ─────────────────────────────────────────────
