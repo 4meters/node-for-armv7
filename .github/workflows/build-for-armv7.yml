@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       node_branch:
-        description: 'Node.js branch to build (e.g. v26.x, v22.x). Leave empty to use default.'
+        description: 'Node.js branch to build (e.g. v26.x, v24.x). Leave empty to use default (v26.x).'
         required: false
         default: ''
   push:
@@ -127,7 +127,7 @@ jobs:
           echo "NODE_VERSION=$NODE_VERSION" >> $GITHUB_ENV
           echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Patch string-hasher for 32-bit host build
+      - name: Patch string-hasher for 32-bit host build (v25.x only)
         working-directory: ${{ env.NODE_DIR }}
         run: |
           FILE="deps/v8/src/strings/string-hasher.cc"
@@ -150,7 +150,7 @@ jobs:
             echo "Patched $COUNT occurrence(s) in $FILE"
           fi
 
-      - name: Patch V8 int64-lowering Tuple template disambiguation (v24.x)
+      - name: Patch V8 int64-lowering Tuple template disambiguation (v24.x only)
         working-directory: ${{ env.NODE_DIR }}
         run: |
           FILE="deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h"
@@ -166,7 +166,7 @@ jobs:
         run: |
           ./configure --dest-cpu arm --partly-static
 
-      - name: Patch node_crates mk files
+      - name: Patch node_crates mk files (v26.x+ only)
         working-directory: ${{ env.NODE_DIR }}
         run: |
           node_crates_host_file="${NODE_DIR}/out/deps/crates/node_crates.host.mk"
