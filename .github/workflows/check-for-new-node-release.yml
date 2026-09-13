@@ -1,0 +1,89 @@
+name: Check for new Node.js release
+
+on:
+  schedule:
+    # Second Saturday: day 8-14, Saturday (day 6)
+    - cron: '0 6 8-14 * 6'
+    # Last Saturday: day 22-28, Saturday (day 6)
+    - cron: '0 6 22-28 * 6'
+  workflow_dispatch:
+
+env:
+  NODE_BRANCH: v26.x
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve latest Node.js release tag
+        id: resolve
+        run: |
+          BRANCH="${{ env.NODE_BRANCH }}"
+          MAJOR=$(echo "$BRANCH" | grep -oE '[0-9]+')
+
+          LATEST_TAG=$(git ls-remote --tags --refs https://github.com/nodejs/node.git \
+            | awk -F'/' '{print $NF}' \
+            | grep -E "^v${MAJOR}\.[0-9]+\.[0-9]+$" \
+            | sort -V \
+            | tail -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: could not resolve latest tag for branch $BRANCH"
+            exit 1
+          fi
+
+          echo "Latest Node.js tag: $LATEST_TAG"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest built release in this repo
+        id: built
+        run: |
+          LATEST_RELEASE=$(gh release list \
+            --repo ${{ github.repository }} \
+            --limit 1 \
+            --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+
+          # Extract version: v26.3.0-armv7l -> v26.3.0
+          LATEST_BUILT=""
+          if [ -n "$LATEST_RELEASE" ]; then
+            LATEST_BUILT="v$(echo "$LATEST_RELEASE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          fi
+
+          echo "Latest built: $LATEST_BUILT"
+          echo "latest_built=$LATEST_BUILT" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger build if newer version available
+        run: |
+          LATEST_TAG="${{ steps.resolve.outputs.latest_tag }}"
+          LATEST_BUILT="${{ steps.built.outputs.latest_built }}"
+
+          echo "Latest Node.js: $LATEST_TAG"
+          echo "Latest built:   $LATEST_BUILT"
+
+          if [ -z "$LATEST_BUILT" ]; then
+            echo "No existing release found, triggering build"
+            TRIGGER=true
+          elif [ "$LATEST_TAG" = "$LATEST_BUILT" ]; then
+            echo "Already up to date ($LATEST_TAG), no build needed"
+            TRIGGER=false
+          else
+            NEWER=$(printf '%s\n%s\n' "$LATEST_TAG" "$LATEST_BUILT" | sort -V | tail -1)
+            if [ "$NEWER" = "$LATEST_TAG" ]; then
+              echo "New version available: $LATEST_TAG (have $LATEST_BUILT), triggering build"
+              TRIGGER=true
+            else
+              echo "Already up to date"
+              TRIGGER=false
+            fi
+          fi
+
+          if [ "$TRIGGER" = "true" ]; then
+            gh workflow run build-for-armv7.yml \
+              --repo ${{ github.repository }} \
+              --field node_branch=${{ env.NODE_BRANCH }}
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
