@@ -89,41 +89,38 @@ export CXX_target="ccache $CROSS_GXX"
 export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER="gcc"
 export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="$CROSS_GCC"
 
-# ── Step 5: Clone Node.js and checkout release commit ─────────
+# ── Step 5: Clone Node.js - latest release tag ─────────
 echo -e "\n=== Step 5: Clone Node.js ($NODE_BRANCH) ==="
 if [ ! -d "$NODE_SRC/.git" ]; then
-    git clone --branch "$NODE_BRANCH" --single-branch \
-        https://github.com/nodejs/node.git "$NODE_SRC"
+  MAJOR=$(echo "$NODE_BRANCH" | grep -oE '^[0-9]+' || echo "$NODE_BRANCH" | sed 's/^v//;s/\.x$//')
+
+  # List remote tags matching this major version, sorted by version, take latest.
+  # Node tags releases as vX.Y.Z with no extra suffix on the main repo.
+  LATEST_TAG=$(git ls-remote --tags --refs https://github.com/nodejs/node.git \
+    | awk -F'/' '{print $NF}' \
+    | grep -E "^v${MAJOR}\.[0-9]+\.[0-9]+$" \
+    | sort -V \
+    | tail -1)
+
+  if [ -z "$LATEST_TAG" ]; then
+    echo "ERROR: could not resolve latest tag for branch $NODE_BRANCH"
+    exit 1
+  fi
+
+  git clone --branch "$LATEST_TAG" --depth 1 --single-branch \
+              https://github.com/nodejs/node.git node
+            echo "Cloned $(cd node && git rev-parse HEAD)"
+  NODE_VERSION="$LATEST_TAG#v"
+  echo "Node v$NODE_VERSION"
 else
     echo "Node source already cloned at $NODE_SRC"
 fi
-
-cd "$NODE_SRC"
-
-COMMIT_ID=$(git log --format="%H %s" | \
-    grep -E "[0-9]{4}-[0-9]{2}-[0-9]{2}, Version [0-9]+\.[0-9]+\.[0-9]+" | \
-    head -1 | awk '{print $1}')
-
-if [ -z "$COMMIT_ID" ]; then
-    echo "ERROR: Could not find any release commit on $NODE_BRANCH"
-    echo "=== Recent commits ==="
-    git log --oneline -20
-    exit 1
-fi
-
-COMMIT_MSG=$(git log -1 --format="%s" "$COMMIT_ID")
-echo "Found release commit: $COMMIT_MSG"
-
-NODE_VERSION=$(echo "$COMMIT_MSG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-echo "Node.js version: $NODE_VERSION"
-
-git checkout "$COMMIT_ID"
 
 # ── Step 6a: Patch string-hasher (v25.x+ only) ───────────────────────────────
 echo -e "\n=== Step 6: Patch string-hasher (v25.x+ only) ==="
 FILE="$NODE_SRC/deps/v8/src/strings/string-hasher.cc"
 
-if [ -f "$NODE_SRC/.sse2-patched" ]; then
+if [ -f "$NODE_SRC/.patched-sse2" ]; then
     echo "Already patched (found .sse2-patched), skipping"
 elif ! grep -q "#ifdef __SSE2__" "$FILE"; then
 	echo "WARN: #ifdef __SSE2__ not found in $FILE — not patching"
@@ -140,7 +137,7 @@ else
 
     COUNT=$(grep -c "#ifdef __SSE2__" "$FILE")
     sed -i 's/#ifdef __SSE2__/#if defined(__SSE2__) \&\& defined(__x86_64__)/g' "$FILE"
-    touch "$NODE_SRC/.sse2-patched"
+    touch "$NODE_SRC/.patched-sse2"
     echo "Patched $COUNT occurrence(s) in $FILE"
 fi
 
@@ -162,29 +159,29 @@ cd "$NODE_SRC"
 
 # ── Step 8: Patch node_crates mk files (v26.x+ only) ────────────────────────
 echo -e "\n=== Step 8: Patch node_crates mk files (v26.x+ only) ==="
-if [ -f "$NODE_SRC/.node-crates-patched" ]; then
-    echo "Already patched (found .node-crates-patched), skipping"
+if [ -f "$NODE_SRC/.patched-node-crates" ]; then
+  echo "Already patched (found .patched-node-crates), skipping"
 else
-    node_crates_host_file="${NODE_DIR}/out/deps/crates/node_crates.host.mk"
+  node_crates_host_file="${NODE_SRC}/out/deps/crates/node_crates.host.mk"
 	if [[ -f "$node_crates_host_file" ]]; then
 		sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/i686-unknown-linux-gnu/release; cargo rustc --release --frozen --target i686-unknown-linux-gnu --target-dir "$(obj)/gen"|g' "$node_crates_host_file"
 		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' "$node_crates_host_file"
 	fi
-	node_crates_target_file="${NODE_DIR}/out/deps/crates/node_crates.target.mk"
+	node_crates_target_file="${NODE_SRC}/out/deps/crates/node_crates.target.mk"
 	if [[ -f "$node_crates_target_file" ]]; then
 		sed -i 's|mkdir -p $(obj)/gen//release; cargo rustc --release --frozen --target-dir "$(obj)/gen"|mkdir -p $(obj)/gen/armv7-unknown-linux-gnueabihf/release; cargo rustc --release --frozen --target armv7-unknown-linux-gnueabihf --target-dir "$(obj)/gen"|g' "$node_crates_target_file"
 		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' "$node_crates_target_file"
 	fi
-	mksnapshot_file="${NODE_DIR}/out/tools/v8_gypfiles/mksnapshot.host.mk"
+	mksnapshot_file="${NODE_SRC}/out/tools/v8_gypfiles/mksnapshot.host.mk"
 	if [[ -f "$mksnapshot_file" ]]; then
 		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/i686-unknown-linux-gnu/release/libnode_crates.a|g' "$mksnapshot_file"
 	fi
 
 	for f in \
-	"${NODE_DIR}/out/node.target.mk" \
-	"${NODE_DIR}/out/embedtest.target.mk" \
-	"${NODE_DIR}/out/cctest.target.mk" \
-	"${NODE_DIR}/out/node_mksnapshot.target.mk"
+    "${NODE_SRC}/out/node.target.mk" \
+    "${NODE_SRC}/out/embedtest.target.mk" \
+    "${NODE_SRC}/out/cctest.target.mk" \
+    "${NODE_SRC}/out/node_mksnapshot.target.mk"
 	do
 		if [[ -f "$f" ]]; then
 	  		sed -i 's|$(obj)/gen//release/libnode_crates.a|$(obj)/gen/armv7-unknown-linux-gnueabihf/release/libnode_crates.a|g' \
@@ -193,7 +190,7 @@ else
 	done
 
 	if [[ -f "$node_crates_host_file" ]] && [[ -f "$node_crates_target_file" ]]; then
-		touch "$NODE_SRC/.node-crates-patched"
+		touch "$NODE_SRC/.patched-node-crates"
 		echo "=== Patch verification ==="
 		grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.host.mk"
 		grep "cargo rustc" "$NODE_SRC/out/deps/crates/node_crates.target.mk"

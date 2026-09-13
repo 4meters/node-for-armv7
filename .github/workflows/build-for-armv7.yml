@@ -7,9 +7,6 @@ on:
         description: 'Node.js branch to build (e.g. v26.x, v24.x). Leave empty to use default (v26.x).'
         required: false
         default: ''
-  push:
-    branches:
-      - main
 
 env:
   NODE_BRANCH: v26.x
@@ -59,12 +56,35 @@ jobs:
             make \
             git
 
+      - name: Resolve latest release tag
+        id: resolve
+        run: |
+          BRANCH="${{ github.event.inputs.node_branch || env.NODE_BRANCH }}"
+          MAJOR=$(echo "$BRANCH" | grep -oE '^[0-9]+' || echo "$BRANCH" | sed 's/^v//;s/\.x$//')
+
+          # List remote tags matching this major version, sorted by version, take latest.
+          # Node tags releases as vX.Y.Z with no extra suffix on the main repo.
+          LATEST_TAG=$(git ls-remote --tags --refs https://github.com/nodejs/node.git \
+            | awk -F'/' '{print $NF}' \
+            | grep -E "^v${MAJOR}\.[0-9]+\.[0-9]+$" \
+            | sort -V \
+            | tail -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: could not resolve latest tag for branch $BRANCH"
+            exit 1
+          fi
+
+          echo "Resolved branch $BRANCH -> latest tag $LATEST_TAG"
+          echo "resolved_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
       - name: Cache Node.js source
         id: cache-source
         uses: actions/cache@v4
         with:
           path: node
-          key: node-source-v1
+          key: node-source-${{ steps.resolve.outputs.resolved_tag }}-v1
         # To invalidate cache: change key from v1 to v2 (or any new string)
         # This ensures the next build starts fresh without cached source
 
@@ -85,44 +105,19 @@ jobs:
           echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=gcc" >> $GITHUB_ENV
           echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=${CROSS_GCC}" >> $GITHUB_ENV
 
-      - name: Clone Node.js and checkout release commit
+      - name: Clone Node.js at resolved tag
         id: get_version
         if: steps.cache-source.outputs.cache-hit != 'true'
         run: |
-          # Use manually entered branch if provided, otherwise fall back to env default
-          BRANCH="${{ github.event.inputs.node_branch }}"
-          BRANCH="${BRANCH:-${{ env.NODE_BRANCH }}}"
-          echo "Building Node.js from branch: $BRANCH"
-
-          git clone --branch "$BRANCH" --single-branch \
+          git clone --branch "${{ steps.resolve.outputs.resolved_tag }}" --depth 1 --single-branch \
             https://github.com/nodejs/node.git node
-          cd node
-
-          # Find the first commit matching the release pattern:
-          # e.g. "2026-06-18, Version 26.3.1 (Current)"
-          # No specific version pinned — always picks the latest release commit
-          # on the branch.
-          COMMIT_ID=$(git log --format="%H %s" | \
-            grep -E "[0-9]{4}-[0-9]{2}-[0-9]{2}, Version [0-9]+\.[0-9]+\.[0-9]+" | \
-            head -1 | awk '{print $1}')
-
-          if [ -z "$COMMIT_ID" ]; then
-            echo "ERROR: Could not find any release commit on $BRANCH"
-            echo "=== Recent commits ==="
-            git log --oneline -20
-            exit 1
-          fi
-
-          echo "=== Found release commit: $COMMIT_ID ==="
-          git checkout "$COMMIT_ID"
+          echo "Cloned $(cd node && git rev-parse HEAD)"
 
       - name: Extract Node.js version
         id: extract_version
         run: |
-          cd "$GITHUB_WORKSPACE/node"
-          COMMIT_MSG=$(git log -1 --format="%s")
-          echo "$COMMIT_MSG"
-          NODE_VERSION=$(echo "$COMMIT_MSG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          NODE_VERSION="${{ steps.resolve.outputs.resolved_tag }}"
+          NODE_VERSION="${NODE_VERSION#v}"
           echo "Detected Node.js version: $NODE_VERSION"
           echo "NODE_VERSION=$NODE_VERSION" >> $GITHUB_ENV
           echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
@@ -142,12 +137,11 @@ jobs:
             # a plain #ifdef __SSE2__ needs the patch — safe to replace all occurrences.
             if ! grep -q "_mm_cvtsi128_si64" "$FILE"; then
               echo "ERROR: No _mm_cvtsi128_si64 found in $FILE — patch may not be needed"
-              exit 1
+            else
+              COUNT=$(grep -c "#ifdef __SSE2__" "$FILE")
+              sed -i 's/#ifdef __SSE2__/#if defined(__SSE2__) \&\& defined(__x86_64__)/g' "$FILE"
+              echo "Patched $COUNT occurrence(s) in $FILE"
             fi
-  
-            COUNT=$(grep -c "#ifdef __SSE2__" "$FILE")
-            sed -i 's/#ifdef __SSE2__/#if defined(__SSE2__) \&\& defined(__x86_64__)/g' "$FILE"
-            echo "Patched $COUNT occurrence(s) in $FILE"
           fi
 
       - name: Patch V8 int64-lowering Tuple template disambiguation (v24.x only)
@@ -158,7 +152,7 @@ jobs:
             sed -i 's/__ Tuple</__ template Tuple</g' "$FILE"
             echo "Patched Tuple template disambiguation in $FILE"
           else
-            echo "No unfixed '__ Tuple<' occurrences in $FILE, skipping (v26.x already upstream-fixed)"
+            echo "No unfixed '__ Tuple<' occurrences in $FILE, skipping (v25.x+ already upstream-fixed)"
           fi
 
       - name: Configure Node.js
@@ -279,15 +273,6 @@ jobs:
             libc6-dev \
             make
 
-      - name: Cache Node.js source
-        id: cache-source
-        uses: actions/cache@v4
-        with:
-          path: node
-          key: node-source-v1
-        # To invalidate cache: change key from v1 to v2 (or any new string)
-        # This ensures the next build starts fresh without cached source
-
       - name: Download host build artifact
         uses: actions/download-artifact@v4
         with:
@@ -369,7 +354,10 @@ jobs:
         run: |
           wget https://github.com/tttapa/toolchains/releases/download/1.3.1/x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz
           mkdir -p /opt/tttapa-toolchains
-          tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz             --strip-components=1             -C /opt/tttapa-toolchains             x-tools/armv7-neon-linux-gnueabihf
+          tar -xf x-tools-armv7-neon-linux-gnueabihf-gcc13.tar.xz \
+            --strip-components=1 \
+            -C /opt/tttapa-toolchains \
+            x-tools/armv7-neon-linux-gnueabihf
           TOOLCHAIN_BIN=/opt/tttapa-toolchains/armv7-neon-linux-gnueabihf/bin
           echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
           echo "TOOLCHAIN_BIN=$TOOLCHAIN_BIN" >> $GITHUB_ENV
